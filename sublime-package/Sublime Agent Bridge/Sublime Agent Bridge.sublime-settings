@@ -1,0 +1,20 @@
+{
+    // Start the localhost bridge automatically when Sublime loads this package.
+    "start_on_load": true,
+
+    // Bind only to localhost. Do not change this unless you fully understand the risk.
+    "host": "127.0.0.1",
+
+    // 0 means ask the OS for an available port.
+    "port": 0,
+
+    // If true, allow the generic run_window_command and run_text_command RPC methods.
+    "allow_run_command": true,
+
+    // Allow run_window_command/run_text_command for these commands. Empty means all commands
+    // are allowed when allow_run_command is true.
+    "command_allowlist": [],
+
+    // Maximum response body size for panel/view text returned via RPC.
+    "max_text_bytes": 524288
+}

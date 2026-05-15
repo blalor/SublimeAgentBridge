@@ -1,0 +1,14 @@
+[
+    {
+        "caption": "Sublime Agent Bridge: Start Server",
+        "command": "sublime_agent_bridge_start"
+    },
+    {
+        "caption": "Sublime Agent Bridge: Stop Server",
+        "command": "sublime_agent_bridge_stop"
+    },
+    {
+        "caption": "Sublime Agent Bridge: Show Status",
+        "command": "sublime_agent_bridge_status"
+    }
+]
