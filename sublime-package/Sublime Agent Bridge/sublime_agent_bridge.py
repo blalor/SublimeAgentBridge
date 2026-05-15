@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import socketserver
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ PACKAGE = "Sublime Agent Bridge"
 SETTINGS = "Sublime Agent Bridge.sublime-settings"
 CONNECTION_FILE = os.path.join(sublime.cache_path(), PACKAGE, "connection.json")
 LOG_FILE = os.path.join(sublime.cache_path(), PACKAGE, "bridge.log")
+DEFAULT_SOCKET_PATH = os.path.join(sublime.cache_path(), PACKAGE, "bridge.sock")
 
 _server = None
 _server_lock = threading.RLock()
@@ -93,9 +95,11 @@ def rpc_status(_params):
     return {
         "running": server is not None,
         "connectionFile": CONNECTION_FILE,
+        "transport": server.transport if server else None,
         "url": server.url if server else None,
         "host": server.host if server else None,
         "port": server.port if server else None,
+        "socketPath": server.socket_path if server else None,
         "pid": os.getpid(),
     }
 
@@ -260,11 +264,21 @@ RPC_METHODS = {
 }
 
 
+def handle_rpc_request(request, token):
+    if request.get("token") not in (None, token):
+        raise PermissionError("unauthorized")
+    method = request.get("method")
+    params = request.get("params") or {}
+    request_id = request.get("id")
+    if method not in RPC_METHODS:
+        raise ValueError("Unknown method: {}".format(method))
+    return {"id": request_id, "ok": True, "result": RPC_METHODS[method](params)}
+
+
 class BridgeRequestHandler(BaseHTTPRequestHandler):
     server_version = "SublimeAgentBridge/0.1"
 
     def log_message(self, format, *args):
-        # Keep Sublime's console quiet unless there is an explicit RPC response.
         return
 
     def do_GET(self):
@@ -283,14 +297,8 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
-            request = json.loads(raw) if raw else {}
-            method = request.get("method")
-            params = request.get("params") or {}
-            request_id = request.get("id")
-            if method not in RPC_METHODS:
-                raise ValueError("Unknown method: {}".format(method))
-            result = RPC_METHODS[method](params)
-            self.write_json(200, {"id": request_id, "ok": True, "result": result})
+            response = handle_rpc_request(json.loads(raw) if raw else {}, self.server.bridge_token)
+            self.write_json(200, response)
         except Exception as e:
             self.write_json(500, {"ok": False, "error": str(e), "traceback": traceback.format_exc()})
 
@@ -303,33 +311,76 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class UnixRpcHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        try:
+            raw = self.rfile.readline(1024 * 1024).decode("utf-8")
+            response = handle_rpc_request(json.loads(raw) if raw else {}, self.server.bridge_token)
+        except Exception as e:
+            response = {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
+        self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
+
+
+class ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
 class BridgeServer:
     def __init__(self):
         cfg = settings()
+        self.transport = cfg.get("transport", "unix")
         self.host = cfg.get("host", "127.0.0.1")
         self.requested_port = int(cfg.get("port", 0))
+        self.socket_path = os.path.expanduser(cfg.get("socket_path") or DEFAULT_SOCKET_PATH)
         self.token = secrets.token_urlsafe(32)
-        self.httpd = ThreadingHTTPServer((self.host, self.requested_port), BridgeRequestHandler)
-        self.httpd.bridge_token = self.token
-        self.port = self.httpd.server_address[1]
-        self.url = "http://{}:{}".format(self.host, self.port)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, name="SublimeAgentBridge", daemon=True)
+        self.port = None
+        self.url = None
+        if self.transport == "tcp":
+            self.server = ThreadingHTTPServer((self.host, self.requested_port), BridgeRequestHandler)
+            self.server.bridge_token = self.token
+            self.port = self.server.server_address[1]
+            self.url = "http://{}:{}".format(self.host, self.port)
+            self.endpoint = self.url
+        else:
+            os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
+            try:
+                os.unlink(self.socket_path)
+            except FileNotFoundError:
+                pass
+            self.server = ThreadingUnixStreamServer(self.socket_path, UnixRpcHandler)
+            self.server.bridge_token = self.token
+            try:
+                os.chmod(self.socket_path, 0o600)
+            except OSError:
+                pass
+            self.endpoint = self.socket_path
+        self.thread = threading.Thread(target=self.server.serve_forever, name="SublimeAgentBridge", daemon=True)
 
     def start(self):
         self.thread.start()
-        write_connection_file({
-            "url": self.url,
+        data = {
+            "transport": self.transport,
             "token": self.token,
             "pid": os.getpid(),
             "package": PACKAGE,
             "sublimeVersion": sublime.version(),
-        })
-        sublime.status_message("Sublime Agent Bridge listening on {}".format(self.url))
+        }
+        if self.transport == "tcp":
+            data.update({"url": self.url, "host": self.host, "port": self.port})
+        else:
+            data.update({"socketPath": self.socket_path})
+        write_connection_file(data)
+        sublime.status_message("Sublime Agent Bridge listening on {}".format(self.endpoint))
 
     def stop(self):
         try:
-            self.httpd.shutdown()
-            self.httpd.server_close()
+            self.server.shutdown()
+            self.server.server_close()
+            if self.transport != "tcp":
+                try:
+                    os.unlink(self.socket_path)
+                except FileNotFoundError:
+                    pass
         finally:
             remove_connection_file()
             sublime.status_message("Sublime Agent Bridge stopped")
@@ -348,7 +399,7 @@ def start_server():
         try:
             _server = BridgeServer()
             _server.start()
-            log("started {}".format(_server.url))
+            log("started {}".format(_server.endpoint))
             return _server
         except Exception:
             log("start failed:\n" + traceback.format_exc())
@@ -378,7 +429,7 @@ class SublimeAgentBridgeStatusCommand(sublime_plugin.ApplicationCommand):
     def run(self):
         server = get_server()
         if server:
-            sublime.message_dialog("Sublime Agent Bridge is running\n\n{}\n\nDiscovery:\n{}".format(server.url, CONNECTION_FILE))
+            sublime.message_dialog("Sublime Agent Bridge is running\n\n{}\n\nDiscovery:\n{}".format(server.endpoint, CONNECTION_FILE))
         else:
             sublime.message_dialog("Sublime Agent Bridge is stopped\n\nDiscovery:\n{}".format(CONNECTION_FILE))
 

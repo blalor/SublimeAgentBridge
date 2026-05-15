@@ -2,10 +2,16 @@
     // Start the localhost bridge automatically when Sublime loads this package.
     "start_on_load": true,
 
-    // Bind only to localhost. Do not change this unless you fully understand the risk.
+    // Prefer a Unix domain socket. Set to "tcp" to use localhost HTTP instead.
+    "transport": "unix",
+
+    // Unix socket path. Empty means use Sublime's cache dir.
+    "socket_path": "",
+
+    // TCP fallback settings. Bind only to localhost.
     "host": "127.0.0.1",
 
-    // 0 means ask the OS for an available port.
+    // 0 means ask the OS for an available TCP port.
     "port": 0,
 
     // If true, allow the generic run_window_command and run_text_command RPC methods.

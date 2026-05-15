@@ -1,6 +1,6 @@
 # Sublime Agent Bridge
 
-Local bridge between a running Sublime Text instance and Pi.
+Local bridge between a running Sublime Text instance and Pi. The default transport is an authenticated Unix domain socket; TCP localhost is available as a fallback.
 
 This repository contains both halves:
 
@@ -30,10 +30,10 @@ Command Palette:
 - `Sublime Agent Bridge: Stop Server`
 - `Sublime Agent Bridge: Show Status`
 
-The server writes discovery info to:
+The server writes discovery info, including the Unix socket path and bearer token, to:
 
 ```text
-~/Library/Application Support/Sublime Text/Cache/Sublime Agent Bridge/connection.json
+~/Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json
 ```
 
 ## Pi tools
@@ -50,7 +50,8 @@ The Pi extension registers:
 
 ## Security
 
-- Binds to `127.0.0.1` only.
-- Requires a random bearer token.
-- Discovery file is written with mode `0600` where supported.
+- Defaults to a Unix domain socket under Sublime's cache directory.
+- TCP mode, if enabled, binds to `127.0.0.1` only.
+- Requires a random bearer token in both transports.
+- Discovery file and socket are written with mode `0600` where supported.
 - No arbitrary Python eval endpoint.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 method="${1:-ping}"
 params="${2:-{}}"
-connection_file="$HOME/Library/Application Support/Sublime Text/Cache/Sublime Agent Bridge/connection.json"
+connection_file="$HOME/Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"
 
 if [[ ! -f "$connection_file" ]]; then
   echo "connection file not found: $connection_file" >&2
@@ -11,11 +11,41 @@ if [[ ! -f "$connection_file" ]]; then
   exit 2
 fi
 
-url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$connection_file")"
-token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$connection_file")"
+python3 - "$connection_file" "$method" "$params" <<'PY'
+import http.client
+import json
+import socket
+import sys
+import urllib.parse
 
-curl -fsS \
-  -H 'content-type: application/json' \
-  -H "authorization: Bearer $token" \
-  --data "$(python3 -c 'import json,sys; print(json.dumps({"id":"cli","method":sys.argv[1],"params":json.loads(sys.argv[2])}))' "$method" "$params")" \
-  "$url/rpc" | python3 -m json.tool
+connection_file, method, params = sys.argv[1:]
+conn = json.load(open(connection_file))
+payload = json.dumps({
+    "id": "cli",
+    "method": method,
+    "params": json.loads(params),
+    "token": conn["token"],
+}).encode()
+
+if conn.get("transport") == "unix" or conn.get("socketPath"):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(conn["socketPath"])
+    sock.sendall(payload + b"\n")
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    sock.close()
+    print(json.dumps(json.loads(data.decode()), indent=2, sort_keys=True))
+else:
+    url = urllib.parse.urlparse(conn["url"])
+    http = http.client.HTTPConnection(url.hostname, url.port)
+    http.request("POST", "/rpc", body=payload, headers={
+        "content-type": "application/json",
+        "authorization": "Bearer " + conn["token"],
+    })
+    response = http.getresponse()
+    print(json.dumps(json.loads(response.read().decode()), indent=2, sort_keys=True))
+PY

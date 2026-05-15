@@ -1,13 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createConnection } from "node:net";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 
 type BridgeConnection = {
-  url: string;
+  transport?: "unix" | "tcp";
+  url?: string;
+  socketPath?: string;
   token: string;
   pid?: number;
   package?: string;
@@ -22,35 +25,84 @@ type RpcResponse = {
   traceback?: string;
 };
 
-const CONNECTION_FILE = join(
-  homedir(),
-  "Library/Application Support/Sublime Text/Cache/Sublime Agent Bridge/connection.json",
-);
+const CONNECTION_FILES = [
+  join(homedir(), "Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
+  join(homedir(), "Library/Application Support/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
+];
 
 async function readConnection(): Promise<BridgeConnection> {
-  const raw = await readFile(CONNECTION_FILE, "utf8");
-  const connection = JSON.parse(raw) as BridgeConnection;
-  if (!connection.url || !connection.token) {
-    throw new Error(`Invalid Sublime Agent Bridge connection file: ${CONNECTION_FILE}`);
+  let lastError: unknown;
+  for (const file of CONNECTION_FILES) {
+    try {
+      const raw = await readFile(file, "utf8");
+      const connection = JSON.parse(raw) as BridgeConnection;
+      if ((!connection.url && !connection.socketPath) || !connection.token) {
+        throw new Error(`Invalid Sublime Agent Bridge connection file: ${file}`);
+      }
+      return connection;
+    } catch (error) {
+      lastError = error;
+    }
   }
-  return connection;
+  throw new Error(`Could not read Sublime Agent Bridge connection file from: ${CONNECTION_FILES.join(", ")} (${lastError})`);
+}
+
+function callUnixSocket(socketPath: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<RpcResponse> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+      socket.removeAllListeners();
+    };
+    const onAbort = () => {
+      socket.destroy();
+      cleanup();
+      reject(new Error("Sublime bridge RPC aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(JSON.stringify(payload) + "\n"));
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) return;
+      const line = buffer.slice(0, newline);
+      cleanup();
+      socket.end();
+      resolve(JSON.parse(line) as RpcResponse);
+    });
+    socket.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+  });
 }
 
 async function callBridge(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<unknown> {
   const connection = await readConnection();
-  const response = await fetch(`${connection.url}/rpc`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "authorization": `Bearer ${connection.token}`,
-    },
-    body: JSON.stringify({ id: `${Date.now()}-${Math.random()}`, method, params }),
-    signal,
-  });
+  const payload = { id: `${Date.now()}-${Math.random()}`, method, params, token: connection.token };
+  let data: RpcResponse;
+  if ((connection.transport === "unix" || connection.socketPath) && connection.socketPath) {
+    data = await callUnixSocket(connection.socketPath, payload, signal);
+  } else {
+    const response = await fetch(`${connection.url}/rpc`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${connection.token}`,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    data = (await response.json()) as RpcResponse;
+    if (!response.ok) {
+      throw new Error(data.error || `Sublime Agent Bridge HTTP ${response.status}`);
+    }
+  }
 
-  const data = (await response.json()) as RpcResponse;
-  if (!response.ok || !data.ok) {
-    throw new Error(data.error || `Sublime Agent Bridge HTTP ${response.status}`);
+  if (!data.ok) {
+    throw new Error(data.error || "Sublime Agent Bridge RPC failed");
   }
   return data.result;
 }
