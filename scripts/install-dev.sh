@@ -23,6 +23,7 @@ cp \
   "$repo_root/sublime-package/Sublime Agent Bridge/sublime_agent_bridge.py" \
   "$repo_root/sublime-package/Sublime Agent Bridge/Default.sublime-commands" \
   "$repo_root/sublime-package/Sublime Agent Bridge/Sublime Agent Bridge.sublime-settings" \
+  "$repo_root/sublime-package/Sublime Agent Bridge/.python-version" \
   "$sublime_package_dir/"
 
 # Keep the Pi extension live-linked to the repo so /reload picks up edits.
