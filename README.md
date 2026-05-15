@@ -4,7 +4,7 @@ Local bridge between a running Sublime Text instance and Pi. The default transpo
 
 This repository contains both halves:
 
-- `sublime-package/Sublime Agent Bridge/` - Sublime Text package that runs an authenticated localhost JSON-RPC server in-process.
+- `sublime-package/Sublime Agent Bridge/` - Sublime Text package that runs an authenticated local RPC server in-process.
 - `pi-extension/sublime-bridge.ts` - Pi extension that discovers the running bridge and exposes Sublime RPC methods as agent tools.
 
 The bridge intentionally starts with a narrow, inspectable API instead of arbitrary Python eval.
@@ -15,7 +15,7 @@ The bridge intentionally starts with a narrow, inspectable API instead of arbitr
 ./scripts/install-dev.sh
 ```
 
-This creates symlinks:
+This installs/copies the Sublime package and symlinks the Pi extension:
 
 - Sublime package -> `~/Library/Application Support/Sublime Text/Packages/Sublime Agent Bridge`
 - Pi extension -> `~/.pi/agent/extensions/sublime-bridge.ts`
@@ -46,7 +46,32 @@ The Pi extension registers:
 - `sublime_list_views`
 - `sublime_run_command`
 - `sublime_get_output_panel`
+- `sublime_resolve_environment`
+- `sublime_which`
 - `sublime_env_doctor`
+
+## Smoke test
+
+```bash
+./scripts/rpc.sh ping
+./scripts/rpc.sh list_windows
+./scripts/rpc.sh which '{"window":"active","tools":["shellcheck","uv"]}'
+```
+
+## Deterministic environment resolution
+
+The bridge can resolve a window-specific execution environment without changing Sublime UI state:
+
+1. collect the window folder/active file in-process,
+2. start from a clean allowlisted base environment rather than Sublime's inherited `PATH`,
+3. discover `direnv` from configured bootstrap paths,
+4. run `direnv export json` in the nearest `.envrc` directory,
+5. use the returned `PATH`/vars for tool discovery or future process launches.
+
+RPC methods:
+
+- `resolve_environment`: returns resolved PATH, selected vars, and optional tool paths.
+- `which`: returns command paths after applying the resolved direnv/Flox environment.
 
 ## Security
 

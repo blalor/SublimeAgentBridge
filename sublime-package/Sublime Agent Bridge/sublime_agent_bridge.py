@@ -1,7 +1,9 @@
 import json
 import os
 import secrets
+import shutil
 import socketserver
+import subprocess
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +47,24 @@ def truncate_text(text):
         return {"text": text, "truncated": False, "bytes": len(data)}
     truncated = data[:limit].decode("utf-8", "replace")
     return {"text": truncated, "truncated": True, "bytes": len(data), "returnedBytes": limit}
+
+
+def dedupe_path(parts):
+    seen = set()
+    output = []
+    for part in parts:
+        if not part:
+            continue
+        expanded = os.path.expanduser(part)
+        if expanded in seen:
+            continue
+        seen.add(expanded)
+        output.append(expanded)
+    return output
+
+
+def split_path(value):
+    return [part for part in value.split(os.pathsep) if part]
 
 
 def write_connection_file(data):
@@ -135,6 +155,52 @@ def window_from_params(params):
     if isinstance(target, int) and 0 <= target < len(windows):
         return windows[target]
     return None
+
+
+def window_start_path(window, params=None):
+    params = params or {}
+    if params.get("path"):
+        return params.get("path")
+    view = find_view(params) if ("view" in params or "viewId" in params) else None
+    if view and view.file_name():
+        return view.file_name()
+    view = window.active_view() if window else None
+    if view and view.file_name():
+        return view.file_name()
+    folders = window.folders() if window else []
+    if folders:
+        return folders[0]
+    return None
+
+
+def folder_for_path(window, path):
+    folders = window.folders() if window else []
+    if path:
+        path = os.path.abspath(path)
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+        matches = [folder for folder in folders if path == folder or path.startswith(folder + os.sep)]
+        if matches:
+            return max(matches, key=len)
+    return folders[0] if folders else None
+
+
+def find_envrc_dir(start, stop_at=None):
+    if not start:
+        return None
+    path = os.path.abspath(start)
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
+    stop_at = os.path.abspath(stop_at) if stop_at else None
+    while True:
+        if os.path.isfile(os.path.join(path, ".envrc")):
+            return path
+        if stop_at and path == stop_at:
+            return None
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
 
 
 def view_summary(view, active=False):
@@ -252,6 +318,105 @@ def rpc_env_doctor(params):
     return run_on_main_thread(lambda: collect_output_panel({**params, "panel": "env_doctor"}))
 
 
+def bootstrap_env():
+    """Return a clean, deterministic base environment for evaluating direnv.
+
+    Do not inherit Sublime's PATH or already-active direnv/Flox variables: if
+    Sublime was launched from an activated terminal, those would contaminate
+    unrelated windows. Keep only a small allowlist that environment managers
+    commonly need, then provide a configured PATH for finding direnv and other
+    bootstrap helpers used by .envrc files.
+    """
+    env = {}
+    for key in settings().get("env_passthrough_vars", []) or []:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.setdefault("HOME", os.path.expanduser("~"))
+    configured = settings().get("env_bootstrap_path_dirs", []) or []
+    env["PATH"] = os.pathsep.join(dedupe_path(configured))
+    return env
+
+
+def find_direnv(env):
+    command = settings().get("direnv_command")
+    if command:
+        expanded = os.path.expanduser(command)
+        if os.path.isabs(expanded) and os.path.exists(expanded):
+            return expanded
+        found = shutil.which(expanded, path=env.get("PATH"))
+        if found:
+            return found
+    return shutil.which("direnv", path=env.get("PATH"))
+
+
+def collect_environment_context(params):
+    def collect():
+        window = window_from_params(params)
+        if not window:
+            raise ValueError("No matching window")
+        start = window_start_path(window, params)
+        folder = folder_for_path(window, start)
+        return {
+            "windowId": window.id(),
+            "startPath": start,
+            "folder": folder,
+            "envrcDir": find_envrc_dir(start, folder),
+        }
+    return run_on_main_thread(collect)
+
+
+def resolve_environment(params):
+    context = collect_environment_context(params)
+    env = bootstrap_env()
+    direnv = find_direnv(env)
+    context["direnv"] = direnv
+    context["bootstrapPath"] = split_path(env.get("PATH", ""))
+    exported = None
+    if direnv and context.get("envrcDir"):
+        proc = subprocess.Popen(
+            [direnv, "export", "json"],
+            cwd=context["envrcDir"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = proc.communicate()
+        context["direnvReturncode"] = proc.returncode
+        context["direnvStderr"] = stderr.decode("utf-8", "replace")
+        if proc.returncode != 0:
+            raise RuntimeError("direnv export json failed: " + context["direnvStderr"])
+        stdout = stdout.decode("utf-8", "replace")
+        exported = json.loads(stdout) if stdout.strip() else {}
+        env.update({k: str(v) for k, v in exported.items() if v is not None})
+    else:
+        context["direnvReturncode"] = None
+        context["direnvStderr"] = ""
+    return context, env, exported or {}
+
+
+def rpc_resolve_environment(params):
+    context, env, exported = resolve_environment(params)
+    interesting = params.get("interestingVars") or settings().get("environment_interesting_vars", []) or []
+    result = dict(context)
+    result["path"] = split_path(env.get("PATH", ""))
+    result["exportedKeys"] = sorted(exported.keys())
+    result["vars"] = {key: env[key] for key in interesting if key in env}
+    if params.get("includeEnv"):
+        result["env"] = env
+    tools = params.get("tools") or []
+    if tools:
+        result["tools"] = {tool: shutil.which(tool, path=env.get("PATH")) for tool in tools}
+    return result
+
+
+def rpc_which(params):
+    tools = params.get("tools") or []
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        raise ValueError("tools must be a list of command names")
+    context, env, _exported = resolve_environment(params)
+    return dict(context, tools={tool: shutil.which(tool, path=env.get("PATH")) for tool in tools})
+
+
 RPC_METHODS = {
     "ping": rpc_ping,
     "status": rpc_status,
@@ -261,6 +426,8 @@ RPC_METHODS = {
     "run_text_command": rpc_run_text_command,
     "get_output_panel": rpc_get_output_panel,
     "env_doctor": rpc_env_doctor,
+    "resolve_environment": rpc_resolve_environment,
+    "which": rpc_which,
 }
 
 
