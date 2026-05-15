@@ -265,7 +265,7 @@ RPC_METHODS = {
 
 
 def handle_rpc_request(request, token):
-    if request.get("token") not in (None, token):
+    if request.get("token") != token:
         raise PermissionError("unauthorized")
     method = request.get("method")
     params = request.get("params") or {}
