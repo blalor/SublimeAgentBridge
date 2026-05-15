@@ -207,19 +207,20 @@ def rpc_run_text_command(params):
     return run_on_main_thread(run)
 
 
-def rpc_get_output_panel(params):
+def collect_output_panel(params):
     panel_name = params.get("panel", "env_doctor")
+    window = window_from_params(params)
+    if not window:
+        raise ValueError("No matching window")
+    view = window.find_output_panel(panel_name)
+    if not view:
+        return {"found": False, "panel": panel_name}
+    text = view.substr(sublime.Region(0, view.size()))
+    return dict({"found": True, "panel": panel_name, "viewId": view.id()}, **truncate_text(text))
 
-    def collect():
-        window = window_from_params(params)
-        if not window:
-            raise ValueError("No matching window")
-        view = window.find_output_panel(panel_name)
-        if not view:
-            return {"found": False, "panel": panel_name}
-        text = view.substr(sublime.Region(0, view.size()))
-        return dict({"found": True, "panel": panel_name, "viewId": view.id()}, **truncate_text(text))
-    return run_on_main_thread(collect)
+
+def rpc_get_output_panel(params):
+    return run_on_main_thread(lambda: collect_output_panel(params))
 
 
 def rpc_env_doctor(params):
@@ -234,9 +235,7 @@ def rpc_env_doctor(params):
         window.run_command("env_doctor")
         return {"ok": True, "windowId": window.id()}
     run_on_main_thread(run)
-    # The command builds the panel synchronously today. A tiny delay gives Sublime a
-    # chance to paint and keeps this robust if the command later schedules work.
-    return run_on_main_thread(lambda: rpc_get_output_panel({**params, "panel": "env_doctor"}))
+    return run_on_main_thread(lambda: collect_output_panel({**params, "panel": "env_doctor"}))
 
 
 RPC_METHODS = {
