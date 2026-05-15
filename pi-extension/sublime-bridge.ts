@@ -202,38 +202,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "sublime_resolve_environment",
-    label: "Sublime Resolve Environment",
-    description: "Resolve a deterministic direnv/Flox-backed environment for a Sublime window without changing UI state.",
-    parameters: Type.Object({
-      window: windowParam,
-      path: Type.Optional(Type.String({ description: "Optional file or directory path to resolve from" })),
-      tools: Type.Optional(Type.Array(Type.String(), { description: "Command names to locate in the resolved PATH" })),
-      interestingVars: Type.Optional(Type.Array(Type.String(), { description: "Environment variable names to return" })),
-      includeEnv: Type.Optional(Type.Boolean({ description: "Return the full environment; may include secrets" })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callBridge("resolve_environment", params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
-    name: "sublime_which",
-    label: "Sublime Which",
-    description: "Resolve command paths for a Sublime window after applying its direnv/Flox environment.",
-    parameters: Type.Object({
-      window: windowParam,
-      path: Type.Optional(Type.String({ description: "Optional file or directory path to resolve from" })),
-      tools: Type.Array(Type.String(), { description: "Command names to locate" }),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callBridge("which", params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
     name: "sublime_env_doctor",
     label: "Sublime Env Doctor",
     description: "Run Env Doctor inside the running Sublime Text process and return its output panel text.",

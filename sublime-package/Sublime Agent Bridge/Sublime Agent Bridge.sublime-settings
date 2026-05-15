@@ -22,55 +22,5 @@
     "command_allowlist": [],
 
     // Maximum response body size for panel/view text returned via RPC.
-    "max_text_bytes": 524288,
-
-    // PATH prefixes used only to find deterministic environment managers such as direnv.
-    "env_bootstrap_path_dirs": [
-        "/opt/homebrew/bin",
-        "/opt/homebrew/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "~/.local/bin",
-        "~/bin",
-        "~/.nix-profile/bin",
-        "/nix/var/nix/profiles/default/bin",
-        "~/.orbstack/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin"
-    ],
-
-    // Variables copied from Sublime's process into the clean environment used to evaluate direnv.
-    "env_passthrough_vars": [
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "SSH_AUTH_SOCK"
-    ],
-
-    // Optional absolute path or command name for direnv. Empty means discover via env_bootstrap_path_dirs.
-    "direnv_command": "",
-
-    // Environment keys returned by resolve_environment. Full env is not returned by default.
-    "environment_interesting_vars": [
-        "PATH",
-        "FLOX_ENV",
-        "FLOX_ENV_CACHE",
-        "DIRENV_DIR",
-        "DIRENV_FILE",
-        "VIRTUAL_ENV",
-        "PYENV_ROOT",
-        "RBENV_ROOT",
-        "GOROOT",
-        "GOPATH",
-        "GOBIN"
-    ]
+    "max_text_bytes": 524288
 }

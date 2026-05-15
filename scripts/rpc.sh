@@ -2,10 +2,7 @@
 set -euo pipefail
 
 method="${1:-ping}"
-params="${2:-}"
-if [[ -z "$params" ]]; then
-  params='{}'
-fi
+params="${2:-{}}"
 connection_file="$HOME/Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"
 
 if [[ ! -f "$connection_file" ]]; then
