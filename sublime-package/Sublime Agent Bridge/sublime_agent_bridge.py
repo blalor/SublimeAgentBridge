@@ -13,9 +13,19 @@ import sublime_plugin
 PACKAGE = "Sublime Agent Bridge"
 SETTINGS = "Sublime Agent Bridge.sublime-settings"
 CONNECTION_FILE = os.path.join(sublime.cache_path(), PACKAGE, "connection.json")
+LOG_FILE = os.path.join(sublime.cache_path(), PACKAGE, "bridge.log")
 
 _server = None
 _server_lock = threading.RLock()
+
+
+def log(message):
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(message + "\n")
+    except Exception:
+        pass
 
 
 def settings():
@@ -335,9 +345,14 @@ def start_server():
     with _server_lock:
         if _server is not None:
             return _server
-        _server = BridgeServer()
-        _server.start()
-        return _server
+        try:
+            _server = BridgeServer()
+            _server.start()
+            log("started {}".format(_server.url))
+            return _server
+        except Exception:
+            log("start failed:\n" + traceback.format_exc())
+            raise
 
 
 def stop_server():
@@ -369,9 +384,11 @@ class SublimeAgentBridgeStatusCommand(sublime_plugin.ApplicationCommand):
 
 
 def plugin_loaded():
+    log("plugin_loaded")
     if settings().get("start_on_load", True):
         start_server()
 
 
 def plugin_unloaded():
+    log("plugin_unloaded")
     stop_server()
