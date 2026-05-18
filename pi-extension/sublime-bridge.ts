@@ -1,16 +1,16 @@
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
+import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 
 type BridgeConnection = {
-  transport?: "unix" | "tcp";
-  url?: string;
-  socketPath?: string;
+  socketPath: string;
   token: string;
   pid?: number;
   package?: string;
@@ -25,9 +25,25 @@ type RpcResponse = {
   traceback?: string;
 };
 
+type BridgeParams = Record<string, unknown>;
+
+type BridgeTool = {
+  name: string;
+  label: string;
+  description: string;
+  method: string;
+  parameters: ReturnType<typeof Type.Object>;
+  promptSnippet?: string;
+  mapParams?: (params: BridgeParams) => { method: string; params: BridgeParams };
+};
+
+const EXTENSION_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
+const SKILLS_DIR = join(EXTENSION_DIR, "skills");
+
 const CONNECTION_FILES = [
+  join(homedir(), "Library/Caches/Sublime Text/Cache/Agent Bridge/connection.json"),
+  // Legacy package name used by earlier versions of the Sublime package.
   join(homedir(), "Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
-  join(homedir(), "Library/Application Support/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
 ];
 
 async function readConnection(): Promise<BridgeConnection> {
@@ -36,15 +52,15 @@ async function readConnection(): Promise<BridgeConnection> {
     try {
       const raw = await readFile(file, "utf8");
       const connection = JSON.parse(raw) as BridgeConnection;
-      if ((!connection.url && !connection.socketPath) || !connection.token) {
-        throw new Error(`Invalid Sublime Agent Bridge connection file: ${file}`);
+      if (!connection.socketPath || !connection.token) {
+        throw new Error(`Invalid Agent Bridge connection file: ${file}`);
       }
       return connection;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error(`Could not read Sublime Agent Bridge connection file from: ${CONNECTION_FILES.join(", ")} (${lastError})`);
+  throw new Error(`Could not read Agent Bridge connection file from: ${CONNECTION_FILES.join(", ")} (${lastError}). STOP and ask the user to start or re-enable the Sublime Agent Bridge server in Sublime Text before continuing.`);
 }
 
 function callUnixSocket(socketPath: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<RpcResponse> {
@@ -79,30 +95,15 @@ function callUnixSocket(socketPath: string, payload: Record<string, unknown>, si
   });
 }
 
-async function callBridge(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<unknown> {
+// All Pi extension RPC traffic to Sublime Text must go through this helper.
+// Do not shell out to scripts/rpc.py or construct ad-hoc bridge clients in tools/commands.
+async function callBridge(method: string, params: BridgeParams = {}, signal?: AbortSignal): Promise<unknown> {
   const connection = await readConnection();
   const payload = { id: `${Date.now()}-${Math.random()}`, method, params, token: connection.token };
-  let data: RpcResponse;
-  if ((connection.transport === "unix" || connection.socketPath) && connection.socketPath) {
-    data = await callUnixSocket(connection.socketPath, payload, signal);
-  } else {
-    const response = await fetch(`${connection.url}/rpc`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${connection.token}`,
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
-    data = (await response.json()) as RpcResponse;
-    if (!response.ok) {
-      throw new Error(data.error || `Sublime Agent Bridge HTTP ${response.status}`);
-    }
-  }
+  const data = await callUnixSocket(connection.socketPath, payload, signal);
 
   if (!data.ok) {
-    throw new Error(data.error || "Sublime Agent Bridge RPC failed");
+    throw new Error(data.error || "Agent Bridge RPC failed");
   }
   return data.result;
 }
@@ -121,120 +122,118 @@ const windowParam = Type.Optional(Type.Union([
   Type.Integer({ description: "Window index or Sublime window id" }),
 ]));
 
-export default function (pi: ExtensionAPI) {
+function registerBridgeTool(pi: ExtensionAPI, tool: BridgeTool) {
   pi.registerTool({
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    promptSnippet: tool.promptSnippet,
+    parameters: tool.parameters,
+    async execute(_toolCallId, params, signal) {
+      const request = tool.mapParams ? tool.mapParams(params as BridgeParams) : { method: tool.method, params: params as BridgeParams };
+      const result = await callBridge(request.method, request.params, signal);
+      return { content: resultContent(result), details: result };
+    },
+  });
+}
+
+const BRIDGE_TOOLS: BridgeTool[] = [
+  {
     name: "sublime_ping",
     label: "Sublime Ping",
-    description: "Check whether the local Sublime Agent Bridge is reachable.",
-    promptSnippet: "Check whether the running Sublime Text bridge is reachable",
+    description: "Check whether the local Agent Bridge is reachable. If this cannot connect or connection.json is missing, STOP and ask the user to start or re-enable the Sublime Agent Bridge server in Sublime Text before continuing.",
+    promptSnippet: "Check whether the running Sublime Text bridge is reachable. If connection.json is missing or the bridge cannot be reached, stop and ask the user to start/re-enable the Sublime Agent Bridge server.",
+    method: "ping",
     parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal) {
-      const result = await callBridge("ping", {}, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
+  },
+  {
     name: "sublime_status",
     label: "Sublime Status",
-    description: "Return Sublime Agent Bridge status and discovery information.",
+    description: "Return Agent Bridge status and discovery information.",
+    method: "status",
     parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal) {
-      const result = await callBridge("status", {}, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
+  },
+  {
     name: "sublime_list_windows",
     label: "Sublime Windows",
     description: "List open Sublime Text windows, folders, and active views.",
+    method: "list_windows",
     parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal) {
-      const result = await callBridge("list_windows", {}, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
+  },
+  {
     name: "sublime_list_views",
     label: "Sublime Views",
     description: "List views in a Sublime Text window.",
+    method: "list_views",
+    parameters: Type.Object({ window: windowParam }),
+  },
+  {
+    name: "sublime_scope_debug",
+    label: "Sublime Scope Debug",
+    description: "Inspect scopes around a point in a Sublime view.",
+    method: "scope_debug",
     parameters: Type.Object({
       window: windowParam,
+      view: Type.Optional(Type.Integer({ description: "Sublime view id" })),
+      point: Type.Optional(Type.Integer({ description: "Buffer point" })),
+      row: Type.Optional(Type.Integer({ description: "Line/row number; 1-based unless row_base is 0" })),
+      line: Type.Optional(Type.Integer({ description: "1-based line number" })),
+      row_base: Type.Optional(Type.Integer({ description: "Set to 0 when row is zero-based" })),
+      col: Type.Optional(Type.Integer({ description: "Column number" })),
+      column: Type.Optional(Type.Integer({ description: "Column number" })),
+      context: Type.Optional(Type.Integer({ description: "Number of surrounding lines" })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callBridge("list_views", params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
+  },
+  {
     name: "sublime_run_command",
     label: "Sublime Command",
     description: "Run a Sublime Text window or text command through the local bridge. Use sparingly; prefer dedicated tools when available.",
+    method: "run_window_command",
     parameters: Type.Object({
       target: Type.Optional(Type.Union([Type.Literal("window"), Type.Literal("text")], { description: "Command target; defaults to window" })),
-      command: Type.String({ description: "Sublime command name, e.g. env_doctor" }),
+      command: Type.String({ description: "Sublime command name" }),
       args: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Command arguments" })),
       window: windowParam,
       view: Type.Optional(Type.Integer({ description: "Sublime view id for text commands" })),
     }),
-    async execute(_toolCallId, params, signal) {
-      const method = params.target === "text" ? "run_text_command" : "run_window_command";
-      const result = await callBridge(method, params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
-
-  pi.registerTool({
+    mapParams: (params) => ({
+      method: params.target === "text" ? "run_text_command" : "run_window_command",
+      params,
+    }),
+  },
+  {
+    name: "sublime_list_output_panels",
+    label: "Sublime Output Panels",
+    description: "List output panels in a Sublime Text window.",
+    method: "list_output_panels",
+    parameters: Type.Object({ window: windowParam }),
+  },
+  {
     name: "sublime_get_output_panel",
     label: "Sublime Output Panel",
     description: "Read text from a Sublime Text output panel.",
+    method: "get_output_panel",
     parameters: Type.Object({
-      panel: Type.String({ description: "Panel name without output. prefix, e.g. env_doctor" }),
+      panel: Type.String({ description: "Panel name without output. prefix" }),
       window: windowParam,
     }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callBridge("get_output_panel", params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
+  },
+];
 
-  pi.registerTool({
-    name: "sublime_env_doctor",
-    label: "Sublime Env Doctor",
-    description: "Run Env Doctor inside the running Sublime Text process and return its output panel text.",
-    promptSnippet: "Run Env Doctor inside Sublime Text and inspect the real plugin-host environment",
-    promptGuidelines: [
-      "Use sublime_env_doctor when verifying Sublime Text environment/plugin behavior from inside the running Sublime process.",
-    ],
-    parameters: Type.Object({
-      window: windowParam,
-    }),
-    async execute(_toolCallId, params, signal) {
-      const result = await callBridge("env_doctor", params, signal);
-      return { content: resultContent(result), details: result };
-    },
-  });
+export default function (pi: ExtensionAPI) {
+  pi.on("resources_discover", async () => ({
+    skillPaths: [SKILLS_DIR],
+  }));
+
+  for (const tool of BRIDGE_TOOLS) {
+    registerBridgeTool(pi, tool);
+  }
 
   pi.registerCommand("sublime-status", {
-    description: "Show Sublime Agent Bridge status",
+    description: "Show Agent Bridge status",
     handler: async (_args, ctx) => {
       try {
         const result = await callBridge("status", {}, ctx.signal);
-        ctx.ui.notify(stringifyResult(result), "info");
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
-  });
-
-  pi.registerCommand("sublime-env-doctor", {
-    description: "Run Env Doctor inside Sublime and show the result",
-    handler: async (_args, ctx) => {
-      try {
-        const result = await callBridge("env_doctor", {}, ctx.signal);
         ctx.ui.notify(stringifyResult(result), "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

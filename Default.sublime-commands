@@ -10,5 +10,9 @@
     {
         "caption": "Sublime Agent Bridge: Show Status",
         "command": "sublime_agent_bridge_status"
+    },
+    {
+        "caption": "Sublime Agent Bridge: Scope Debug Active View",
+        "command": "sublime_agent_bridge_scope_debug"
     }
 ]

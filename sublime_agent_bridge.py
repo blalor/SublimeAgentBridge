@@ -3,22 +3,26 @@ import os
 import secrets
 import socketserver
 import threading
+import time
 import traceback
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
 
 import sublime
 import sublime_plugin
 
 
-PACKAGE = "Sublime Agent Bridge"
-SETTINGS = "Sublime Agent Bridge.sublime-settings"
+PACKAGE = "Agent Bridge"
+DISPLAY_NAME = "Sublime Agent Bridge"
+SETTINGS = "Agent Bridge.sublime-settings"
+BRIDGE_PROTOCOL_VERSION = 1
 CONNECTION_FILE = os.path.join(sublime.cache_path(), PACKAGE, "connection.json")
+LEGACY_CONNECTION_FILE = os.path.join(sublime.cache_path(), DISPLAY_NAME, "connection.json")
+STATE_FILE = os.path.join(sublime.cache_path(), PACKAGE, "bridge-state.json")
 LOG_FILE = os.path.join(sublime.cache_path(), PACKAGE, "bridge.log")
 DEFAULT_SOCKET_PATH = os.path.join(sublime.cache_path(), PACKAGE, "bridge.sock")
 
 _server = None
 _server_lock = threading.RLock()
+_idle_timer_generation = 0
 
 
 def log(message):
@@ -36,6 +40,69 @@ def settings():
 
 def max_text_bytes():
     return int(settings().get("max_text_bytes", 512 * 1024))
+
+
+def idle_timeout_seconds():
+    return max(1, int(settings().get("idle_timeout_seconds", 60 * 60)))
+
+
+def read_active_until():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return float((json.load(f) or {}).get("activeUntil", 0))
+    except (FileNotFoundError, ValueError, TypeError, OSError, json.JSONDecodeError):
+        return 0
+
+
+def write_bridge_state(active_until):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"activeUntil": active_until, "pid": os.getpid()}, f, indent=2, sort_keys=True)
+    try:
+        os.chmod(STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def clear_bridge_state():
+    try:
+        os.unlink(STATE_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+# The idle deadline is persisted so plugin reloads/Sublime restarts only auto-start
+# the bridge while a previously-started server would still have been active.
+# Manual start and authorized RPC requests refresh it; manual stop and idle expiry clear it.
+def refresh_idle_deadline():
+    active_until = time.time() + idle_timeout_seconds()
+    write_bridge_state(active_until)
+    schedule_idle_check(active_until)
+    return active_until
+
+
+def schedule_idle_check(active_until):
+    global _idle_timer_generation
+    with _server_lock:
+        _idle_timer_generation += 1
+        generation = _idle_timer_generation
+    delay_ms = max(1000, int((active_until - time.time()) * 1000) + 250)
+    sublime.set_timeout(lambda: check_idle_timeout(generation), delay_ms)
+
+
+def check_idle_timeout(generation):
+    with _server_lock:
+        if generation != _idle_timer_generation or _server is None:
+            return
+    active_until = read_active_until()
+    now = time.time()
+    if active_until > now:
+        schedule_idle_check(active_until)
+        return
+    log("idle timeout expired")
+    stop_server(clear_state=True)
 
 
 def truncate_text(text):
@@ -58,12 +125,13 @@ def write_connection_file(data):
 
 
 def remove_connection_file():
-    try:
-        os.unlink(CONNECTION_FILE)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
+    for path in (CONNECTION_FILE, LEGACY_CONNECTION_FILE):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def run_on_main_thread(fn, timeout=10.0):
@@ -87,20 +155,31 @@ def run_on_main_thread(fn, timeout=10.0):
 
 
 def rpc_ping(_params):
-    return {"ok": True, "package": PACKAGE, "sublimeVersion": sublime.version()}
+    return {
+        "ok": True,
+        "package": PACKAGE,
+        "name": DISPLAY_NAME,
+        "protocolVersion": BRIDGE_PROTOCOL_VERSION,
+        "sublimeVersion": sublime.version(),
+    }
 
 
 def rpc_status(_params):
     server = get_server()
+    active_until = read_active_until()
     return {
         "running": server is not None,
+        "package": PACKAGE,
+        "name": DISPLAY_NAME,
+        "protocolVersion": BRIDGE_PROTOCOL_VERSION,
         "connectionFile": CONNECTION_FILE,
-        "transport": server.transport if server else None,
-        "url": server.url if server else None,
-        "host": server.host if server else None,
-        "port": server.port if server else None,
+        "legacyConnectionFile": LEGACY_CONNECTION_FILE,
         "socketPath": server.socket_path if server else None,
         "pid": os.getpid(),
+        "idleTimeoutSeconds": idle_timeout_seconds(),
+        "activeUntil": active_until,
+        "activeRemainingSeconds": max(0, int(active_until - time.time())),
+        "methods": sorted(RPC_METHODS.keys()),
     }
 
 
@@ -163,6 +242,67 @@ def rpc_list_views(params):
     return run_on_main_thread(collect)
 
 
+def point_from_params(view, params):
+    if "point" in params:
+        return max(0, min(int(params["point"]), view.size()))
+    if "row" in params or "line" in params:
+        row = int(params.get("row", params.get("line", 1)))
+        # `line` is treated as 1-based for command-palette friendliness; `row`
+        # may be explicitly zero-based by passing row_base=0.
+        if int(params.get("row_base", 1)) != 0:
+            row -= 1
+        col = int(params.get("col", params.get("column", 0)))
+        return max(0, min(view.text_point(max(0, row), max(0, col)), view.size()))
+    if view.sel():
+        return view.sel()[0].begin()
+    return 0
+
+
+def collect_scope_debug(params):
+    window = window_from_params(params)
+    view = find_view(params)
+    if not view:
+        raise ValueError("No matching view")
+
+    point = point_from_params(view, params)
+    row, col = view.rowcol(point)
+    context = int(params.get("context", 8))
+    last_row = view.rowcol(view.size())[0]
+    lines = []
+    for line_no in range(max(0, row - context), min(last_row, row + context) + 1):
+        line_region = view.line(view.text_point(line_no, 0))
+        text = view.substr(line_region)
+        first_non_ws_col = len(text) - len(text.lstrip())
+        first_non_ws_point = min(line_region.a + first_non_ws_col, line_region.b)
+        lines.append({
+            "row": line_no + 1,
+            "text": text,
+            "lineStartPoint": line_region.a,
+            "lineStartScope": view.scope_name(line_region.a),
+            "firstNonWhitespaceColumn": first_non_ws_col,
+            "firstNonWhitespacePoint": first_non_ws_point,
+            "firstNonWhitespaceScope": view.scope_name(first_non_ws_point),
+        })
+
+    return {
+        "windowId": window.id() if window else None,
+        "viewId": view.id(),
+        "fileName": view.file_name(),
+        "syntax": view.settings().get("syntax"),
+        "point": point,
+        "cursor": {
+            "row": row + 1,
+            "col": col,
+            "scope": view.scope_name(point),
+        },
+        "lines": lines,
+    }
+
+
+def rpc_scope_debug(params):
+    return run_on_main_thread(lambda: collect_scope_debug(params))
+
+
 def command_allowed(command):
     if not settings().get("allow_run_command", True):
         return False
@@ -222,7 +362,9 @@ def rpc_run_text_command(params):
 
 
 def collect_output_panel(params):
-    panel_name = params.get("panel", "env_doctor")
+    panel_name = params.get("panel")
+    if not panel_name or not isinstance(panel_name, str):
+        raise ValueError("panel is required")
     window = window_from_params(params)
     if not window:
         raise ValueError("No matching window")
@@ -237,19 +379,30 @@ def rpc_get_output_panel(params):
     return run_on_main_thread(lambda: collect_output_panel(params))
 
 
-def rpc_env_doctor(params):
-    """Run Env Doctor's command, then return its output panel text.
+def output_panel_key(panel_name):
+    prefix = "output."
+    if panel_name.startswith(prefix):
+        return panel_name[len(prefix):]
+    return panel_name
 
-    This intentionally automates the existing command instead of importing its internals.
-    """
-    def run():
+
+def rpc_list_output_panels(params):
+    def collect():
         window = window_from_params(params)
         if not window:
             raise ValueError("No matching window")
-        window.run_command("env_doctor")
-        return {"ok": True, "windowId": window.id()}
-    run_on_main_thread(run)
-    return run_on_main_thread(lambda: collect_output_panel({**params, "panel": "env_doctor"}))
+        panels = []
+        for panel_name in window.panels():
+            panel_key = output_panel_key(panel_name)
+            panel = window.find_output_panel(panel_key)
+            panels.append({
+                "name": panel_name,
+                "panel": panel_key,
+                "viewId": panel.id() if panel else None,
+                "size": panel.size() if panel else None,
+            })
+        return {"windowId": window.id(), "activePanel": window.active_panel(), "panels": panels}
+    return run_on_main_thread(collect)
 
 
 RPC_METHODS = {
@@ -257,58 +410,24 @@ RPC_METHODS = {
     "status": rpc_status,
     "list_windows": rpc_list_windows,
     "list_views": rpc_list_views,
+    "scope_debug": rpc_scope_debug,
     "run_window_command": rpc_run_window_command,
     "run_text_command": rpc_run_text_command,
     "get_output_panel": rpc_get_output_panel,
-    "env_doctor": rpc_env_doctor,
+    "list_output_panels": rpc_list_output_panels,
 }
 
 
 def handle_rpc_request(request, token):
     if request.get("token") != token:
         raise PermissionError("unauthorized")
+    refresh_idle_deadline()
     method = request.get("method")
     params = request.get("params") or {}
     request_id = request.get("id")
     if method not in RPC_METHODS:
         raise ValueError("Unknown method: {}".format(method))
     return {"id": request_id, "ok": True, "result": RPC_METHODS[method](params)}
-
-
-class BridgeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "SublimeAgentBridge/0.1"
-
-    def log_message(self, format, *args):
-        return
-
-    def do_GET(self):
-        if urlparse(self.path).path == "/healthz":
-            self.write_json(200, {"ok": True})
-        else:
-            self.write_json(404, {"error": "not found"})
-
-    def do_POST(self):
-        if urlparse(self.path).path != "/rpc":
-            self.write_json(404, {"error": "not found"})
-            return
-        if self.headers.get("Authorization") != "Bearer " + self.server.bridge_token:
-            self.write_json(401, {"error": "unauthorized"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length).decode("utf-8")
-            response = handle_rpc_request(json.loads(raw) if raw else {}, self.server.bridge_token)
-            self.write_json(200, response)
-        except Exception as e:
-            self.write_json(500, {"ok": False, "error": str(e), "traceback": traceback.format_exc()})
-
-    def write_json(self, status, payload):
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
 
 class UnixRpcHandler(socketserver.StreamRequestHandler):
@@ -328,62 +447,50 @@ class ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixSt
 class BridgeServer:
     def __init__(self):
         cfg = settings()
-        self.transport = cfg.get("transport", "unix")
-        self.host = cfg.get("host", "127.0.0.1")
-        self.requested_port = int(cfg.get("port", 0))
         self.socket_path = os.path.expanduser(cfg.get("socket_path") or DEFAULT_SOCKET_PATH)
         self.token = secrets.token_urlsafe(32)
-        self.port = None
-        self.url = None
-        if self.transport == "tcp":
-            self.server = ThreadingHTTPServer((self.host, self.requested_port), BridgeRequestHandler)
-            self.server.bridge_token = self.token
-            self.port = self.server.server_address[1]
-            self.url = "http://{}:{}".format(self.host, self.port)
-            self.endpoint = self.url
-        else:
-            os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
-            try:
-                os.unlink(self.socket_path)
-            except FileNotFoundError:
-                pass
-            self.server = ThreadingUnixStreamServer(self.socket_path, UnixRpcHandler)
-            self.server.bridge_token = self.token
-            try:
-                os.chmod(self.socket_path, 0o600)
-            except OSError:
-                pass
-            self.endpoint = self.socket_path
+        os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
+        try:
+            os.unlink(self.socket_path)
+        except FileNotFoundError:
+            pass
+        self.server = ThreadingUnixStreamServer(self.socket_path, UnixRpcHandler)
+        self.server.bridge_token = self.token
+        try:
+            os.chmod(self.socket_path, 0o600)
+        except OSError:
+            pass
+        self.endpoint = self.socket_path
         self.thread = threading.Thread(target=self.server.serve_forever, name="SublimeAgentBridge", daemon=True)
 
     def start(self):
         self.thread.start()
+        refresh_idle_deadline()
         data = {
-            "transport": self.transport,
+            "socketPath": self.socket_path,
             "token": self.token,
             "pid": os.getpid(),
             "package": PACKAGE,
+            "name": DISPLAY_NAME,
+            "protocolVersion": BRIDGE_PROTOCOL_VERSION,
             "sublimeVersion": sublime.version(),
         }
-        if self.transport == "tcp":
-            data.update({"url": self.url, "host": self.host, "port": self.port})
-        else:
-            data.update({"socketPath": self.socket_path})
         write_connection_file(data)
-        sublime.status_message("Sublime Agent Bridge listening on {}".format(self.endpoint))
+        sublime.status_message("{} listening on {}".format(DISPLAY_NAME, self.endpoint))
 
-    def stop(self):
+    def stop(self, clear_state=True):
         try:
             self.server.shutdown()
             self.server.server_close()
-            if self.transport != "tcp":
-                try:
-                    os.unlink(self.socket_path)
-                except FileNotFoundError:
-                    pass
+            try:
+                os.unlink(self.socket_path)
+            except FileNotFoundError:
+                pass
         finally:
             remove_connection_file()
-            sublime.status_message("Sublime Agent Bridge stopped")
+            if clear_state:
+                clear_bridge_state()
+            sublime.status_message("{} stopped".format(DISPLAY_NAME))
 
 
 def get_server():
@@ -406,13 +513,16 @@ def start_server():
             raise
 
 
-def stop_server():
+def stop_server(clear_state=True):
     global _server
     with _server_lock:
         server = _server
         _server = None
     if server is not None:
-        server.stop()
+        server.stop(clear_state=clear_state)
+    elif clear_state:
+        clear_bridge_state()
+        remove_connection_file()
 
 
 class SublimeAgentBridgeStartCommand(sublime_plugin.ApplicationCommand):
@@ -428,18 +538,40 @@ class SublimeAgentBridgeStopCommand(sublime_plugin.ApplicationCommand):
 class SublimeAgentBridgeStatusCommand(sublime_plugin.ApplicationCommand):
     def run(self):
         server = get_server()
+        active_until = read_active_until()
+        remaining = max(0, int(active_until - time.time()))
         if server:
-            sublime.message_dialog("Sublime Agent Bridge is running\n\n{}\n\nDiscovery:\n{}".format(server.endpoint, CONNECTION_FILE))
+            sublime.message_dialog(
+                "{} is running\n\n{}\n\nIdle timeout: {} seconds remaining\n\nDiscovery:\n{}".format(
+                    DISPLAY_NAME, server.endpoint, remaining, CONNECTION_FILE
+                )
+            )
         else:
-            sublime.message_dialog("Sublime Agent Bridge is stopped\n\nDiscovery:\n{}".format(CONNECTION_FILE))
+            sublime.message_dialog(
+                "{} is stopped\n\nSaved idle deadline: {} seconds remaining\n\nDiscovery:\n{}".format(
+                    DISPLAY_NAME, remaining, CONNECTION_FILE
+                )
+            )
+
+
+class SublimeAgentBridgeScopeDebugCommand(sublime_plugin.WindowCommand):
+    def run(self, context=8):
+        data = collect_scope_debug({"window": self.window.id(), "context": context})
+        panel = self.window.create_output_panel("agent_bridge_scope_debug")
+        panel.run_command("append", {"characters": json.dumps(data, indent=2), "force": True, "scroll_to_end": False})
+        self.window.run_command("show_panel", {"panel": "output.agent_bridge_scope_debug"})
 
 
 def plugin_loaded():
     log("plugin_loaded")
-    if settings().get("start_on_load", True):
+    active_until = read_active_until()
+    if active_until > time.time():
         start_server()
+    else:
+        clear_bridge_state()
+        remove_connection_file()
 
 
 def plugin_unloaded():
     log("plugin_unloaded")
-    stop_server()
+    stop_server(clear_state=False)
