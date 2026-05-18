@@ -1,6 +1,6 @@
 # Sublime Agent Bridge
 
-Local bridge between a running Sublime Text instance and Pi over an authenticated Unix domain socket.
+Local bridge between a running Sublime Text instance and [Pi](https://pi.dev) over an authenticated Unix domain socket.
 
 This repository contains both halves:
 
@@ -12,7 +12,11 @@ The bridge intentionally starts with a narrow, inspectable API instead of arbitr
 ## Install for local development
 
 1. Clone this repository at `~/Library/Application Support/Sublime Text/Packages/Agent Bridge`.
-2. Create a symlink from `~/.pi/agent/extensions/sublime-bridge.ts` to `pi-extension/sublime-bridge.ts`
+2. Install the bundled Pi package:
+
+   ```bash
+   pi install "$HOME/Library/Application Support/Sublime Text/Packages/Agent Bridge"
+   ```
 
 Then restart Sublime or run `Preferences: Browse Packages` and confirm the package is loaded.  
 In Pi, run `/reload` if already running.
