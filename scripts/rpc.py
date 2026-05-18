@@ -12,20 +12,6 @@ import socket
 import sys
 
 
-CONNECTION_FILES = [
-    os.path.expanduser("~/Library/Caches/Sublime Text/Cache/Agent Bridge/connection.json"),
-    # Legacy package name used by earlier versions of the Sublime package.
-    os.path.expanduser("~/Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
-]
-
-
-def find_connection_file():
-    for path in CONNECTION_FILES:
-        if os.path.isfile(path):
-            return path
-    return None
-
-
 def read_connection(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -54,9 +40,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    connection_file = args.connection_file or find_connection_file()
+    connection_file = os.path.expanduser("~/Library/Caches/Sublime Text/Cache/Agent Bridge/connection.json")
     if not connection_file:
-        print("connection file not found: {}".format(" ".join(CONNECTION_FILES)), file=sys.stderr)
+        print("connection file not found: {}".format(connection_file), file=sys.stderr)
         print("Start the bridge in Sublime with: Sublime Agent Bridge: Start Server", file=sys.stderr)
         return 2
 

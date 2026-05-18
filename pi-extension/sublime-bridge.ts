@@ -40,27 +40,19 @@ type BridgeTool = {
 const EXTENSION_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const SKILLS_DIR = join(EXTENSION_DIR, "skills");
 
-const CONNECTION_FILES = [
-  join(homedir(), "Library/Caches/Sublime Text/Cache/Agent Bridge/connection.json"),
-  // Legacy package name used by earlier versions of the Sublime package.
-  join(homedir(), "Library/Caches/Sublime Text/Cache/Sublime Agent Bridge/connection.json"),
-];
-
 async function readConnection(): Promise<BridgeConnection> {
-  let lastError: unknown;
-  for (const file of CONNECTION_FILES) {
-    try {
-      const raw = await readFile(file, "utf8");
-      const connection = JSON.parse(raw) as BridgeConnection;
-      if (!connection.socketPath || !connection.token) {
-        throw new Error(`Invalid Agent Bridge connection file: ${file}`);
-      }
-      return connection;
-    } catch (error) {
-      lastError = error;
+  let connFile = join(homedir(), "Library/Caches/Sublime Text/Cache/Agent Bridge/connection.json");
+
+  try {
+    const raw = await readFile(connFile, "utf8");
+    const connection = JSON.parse(raw) as BridgeConnection;
+    if (!connection.socketPath || !connection.token) {
+      throw new Error(`Invalid Agent Bridge connection file: ${file}`);
     }
+    return connection;
+  } catch (error) {
+    throw new Error(`Could not read Agent Bridge connection file from: ${connFile} (${error}). STOP and ask the user to start or re-enable the Sublime Agent Bridge server in Sublime Text before continuing.`);
   }
-  throw new Error(`Could not read Agent Bridge connection file from: ${CONNECTION_FILES.join(", ")} (${lastError}). STOP and ask the user to start or re-enable the Sublime Agent Bridge server in Sublime Text before continuing.`);
 }
 
 function callUnixSocket(socketPath: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<RpcResponse> {
