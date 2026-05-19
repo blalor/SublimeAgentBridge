@@ -56,7 +56,7 @@ pi-extension/skills/sublime-text-api/references/bridge-protocol.md
 
 ## Pi tools
 
-The Pi extension registers:
+The Pi extension registers the bridge tools but keeps them inactive by default so they do not occupy model tool context for unrelated tasks. They are activated when the `sublime-text-api` skill is invoked with `/skill:sublime-text-api` or when the agent loads that skill file on demand:
 
 - `sublime_ping`
 - `sublime_status`

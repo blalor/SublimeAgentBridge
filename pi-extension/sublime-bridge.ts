@@ -6,6 +6,7 @@ import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 
@@ -47,7 +48,7 @@ async function readConnection(): Promise<BridgeConnection> {
     const raw = await readFile(connFile, "utf8");
     const connection = JSON.parse(raw) as BridgeConnection;
     if (!connection.socketPath || !connection.token) {
-      throw new Error(`Invalid Agent Bridge connection file: ${file}`);
+      throw new Error(`Invalid Agent Bridge connection file: ${connFile}`);
     }
     return connection;
   } catch (error) {
@@ -212,6 +213,24 @@ const BRIDGE_TOOLS: BridgeTool[] = [
   },
 ];
 
+const BRIDGE_TOOL_NAMES = new Set(BRIDGE_TOOLS.map((tool) => tool.name));
+
+function deactivateBridgeTools(pi: ExtensionAPI) {
+  pi.setActiveTools(pi.getActiveTools().filter((name) => !BRIDGE_TOOL_NAMES.has(name)));
+}
+
+function activateBridgeTools(pi: ExtensionAPI) {
+  pi.setActiveTools([...new Set([...pi.getActiveTools(), ...BRIDGE_TOOL_NAMES])]);
+}
+
+function isSublimeSkillCommand(text: string): boolean {
+  return text.trimStart().startsWith("/skill:sublime-text-api");
+}
+
+function isSublimeSkillPath(path: string): boolean {
+  return path.endsWith("sublime-text-api/SKILL.md") || path.endsWith("sublime-text-api\\SKILL.md");
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("resources_discover", async () => ({
     skillPaths: [SKILLS_DIR],
@@ -220,6 +239,22 @@ export default function (pi: ExtensionAPI) {
   for (const tool of BRIDGE_TOOLS) {
     registerBridgeTool(pi, tool);
   }
+
+  pi.on("session_start", async () => {
+    deactivateBridgeTools(pi);
+  });
+
+  pi.on("input", async (event) => {
+    if (isSublimeSkillCommand(event.text)) {
+      activateBridgeTools(pi);
+    }
+  });
+
+  pi.on("tool_call", async (event) => {
+    if (isToolCallEventType("read", event) && typeof event.input.path === "string" && isSublimeSkillPath(event.input.path)) {
+      activateBridgeTools(pi);
+    }
+  });
 
   pi.registerCommand("sublime-status", {
     description: "Show Agent Bridge status",

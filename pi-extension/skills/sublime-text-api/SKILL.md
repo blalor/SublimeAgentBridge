@@ -23,6 +23,7 @@ For this package's bridge protocol, discovery files, idle timeout lifecycle, and
 - Remember that Sublime Text API calls that touch UI state generally need to run on the main thread; this package uses `run_on_main_thread()` for that.
 - Keep bridge RPC methods narrow and explicit. Do not add arbitrary Python evaluation endpoints.
 - If adding a new Pi tool, add a matching explicit `rpc_*` function in `sublime_agent_bridge.py` and route the extension tool through `callBridge()`.
-- For extension-to-plugin connectivity checks, use registered Pi tools such as `sublime_ping` and `sublime_status`.
+- Loading this skill activates the Sublime bridge Pi tools for the session (`sublime_ping`, `sublime_status`, `sublime_list_windows`, `sublime_list_views`, `sublime_scope_debug`, `sublime_run_command`, `sublime_list_output_panels`, `sublime_get_output_panel`).
+- For extension-to-plugin connectivity checks, use `sublime_ping` and `sublime_status`.
 - Do not use `scripts/rpc.py` unless the user explicitly asks to test the standalone diagnostic script.
 - The Pi extension must never shell out to `scripts/rpc.py` or construct ad-hoc RPC clients; all extension RPC calls must go through the internal `callBridge()` helper.
