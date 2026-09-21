@@ -13,6 +13,9 @@
     // If Sublime restarts before this deadline expires, the bridge starts again.
     "idle_timeout_seconds": 3600,
 
-    // Maximum response body size for panel/view text returned via RPC.
-    "max_text_bytes": 524288
+    // Maximum response body size for panel/view/console text returned via RPC.
+    "max_text_bytes": 524288,
+
+    // Maximum number of console log messages to keep in memory while the bridge is running.
+    "console_log_max_entries": 2000
 }

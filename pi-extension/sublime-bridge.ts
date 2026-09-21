@@ -211,6 +211,16 @@ const BRIDGE_TOOLS: BridgeTool[] = [
       window: windowParam,
     }),
   },
+  {
+    name: "sublime_get_console_log",
+    label: "Sublime Console Log",
+    description: "Read console messages captured while Agent Bridge has been running.",
+    method: "get_console_log",
+    parameters: Type.Object({
+      afterSequence: Type.Optional(Type.Integer({ description: "Only return entries after this console log sequence number" })),
+      after: Type.Optional(Type.Integer({ description: "Alias for afterSequence" })),
+    }),
+  },
 ];
 
 const BRIDGE_TOOL_NAMES = new Set(BRIDGE_TOOLS.map((tool) => tool.name));

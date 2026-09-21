@@ -66,6 +66,7 @@ The Pi extension registers the bridge tools but keeps them inactive by default s
 - `sublime_run_command`
 - `sublime_list_output_panels`
 - `sublime_get_output_panel`
+- `sublime_get_console_log`
 
 ## Security
 

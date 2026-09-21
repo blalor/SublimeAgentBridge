@@ -129,7 +129,7 @@ Returns bridge identity and Sublime version.
 
 Params: `{}`
 
-Returns server status, discovery paths, socket path, idle timeout/deadline, and available method names.
+Returns server status, discovery paths, socket path, idle timeout/deadline, console capture status, and available method names.
 
 ### `list_windows`
 
@@ -238,3 +238,17 @@ Params:
 Returns output panel text, subject to `max_text_bytes` truncation.
 
 Touches Sublime UI state; implementation runs collection on the main thread.
+
+### `get_console_log`
+
+Params may include:
+
+```json
+{
+  "afterSequence": 123
+}
+```
+
+Returns console messages captured while the bridge is running. Capture is implemented by temporarily wrapping Sublime's internal `sublime_api.log_message` when the bridge starts and restoring it when the bridge stops. This only captures future messages after bridge start; it cannot read pre-existing Ctrl-` console history.
+
+The response includes `entries`, concatenated `text` subject to `max_text_bytes` truncation, `nextSequence`, and `hooked`.

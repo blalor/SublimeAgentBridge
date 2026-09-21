@@ -7,6 +7,7 @@ import time
 import traceback
 
 import sublime
+import sublime_api
 import sublime_plugin
 
 
@@ -23,6 +24,11 @@ DEFAULT_SOCKET_PATH = os.path.join(sublime.cache_path(), PACKAGE, "bridge.sock")
 _server = None
 _server_lock = threading.RLock()
 _idle_timer_generation = 0
+_console_log_lock = threading.RLock()
+_console_log_entries = []
+_console_log_next_sequence = 1
+_console_log_original_message = None
+_console_log_hook = None
 
 
 def log(message):
@@ -40,6 +46,10 @@ def settings():
 
 def max_text_bytes():
     return int(settings().get("max_text_bytes", 512 * 1024))
+
+
+def console_log_max_entries():
+    return max(1, int(settings().get("console_log_max_entries", 2000)))
 
 
 def idle_timeout_seconds():
@@ -114,6 +124,93 @@ def truncate_text(text):
     return {"text": truncated, "truncated": True, "bytes": len(data), "returnedBytes": limit}
 
 
+def normalize_console_message(message):
+    if isinstance(message, bytes):
+        return message.decode("utf-8", "replace")
+    return str(message)
+
+
+def append_console_log(message):
+    global _console_log_next_sequence
+    text = normalize_console_message(message)
+    with _console_log_lock:
+        entry = {
+            "sequence": _console_log_next_sequence,
+            "time": time.time(),
+            "text": text,
+        }
+        _console_log_next_sequence += 1
+        _console_log_entries.append(entry)
+        overflow = len(_console_log_entries) - console_log_max_entries()
+        if overflow > 0:
+            del _console_log_entries[:overflow]
+
+
+def install_console_log_hook():
+    global _console_log_original_message, _console_log_hook
+    with _console_log_lock:
+        if _console_log_hook is not None and sublime_api.log_message is _console_log_hook:
+            return True
+
+        original = sublime_api.log_message
+
+        def hooked_log_message(message):
+            try:
+                append_console_log(message)
+            except Exception:
+                pass
+            return original(message)
+
+        _console_log_original_message = original
+        _console_log_hook = hooked_log_message
+        sublime_api.log_message = hooked_log_message
+        return True
+
+
+def uninstall_console_log_hook():
+    global _console_log_original_message, _console_log_hook
+    with _console_log_lock:
+        if _console_log_hook is None:
+            return False
+        if sublime_api.log_message is _console_log_hook:
+            sublime_api.log_message = _console_log_original_message
+            restored = True
+        else:
+            # Another plugin wrapped log_message after Agent Bridge. Avoid clobbering it.
+            restored = False
+        _console_log_original_message = None
+        _console_log_hook = None
+        return restored
+
+
+def console_log_hooked():
+    with _console_log_lock:
+        return _console_log_hook is not None and sublime_api.log_message is _console_log_hook
+
+
+def collect_console_log(params):
+    after_sequence = params.get("afterSequence") or params.get("after") or 0
+    try:
+        after_sequence = int(after_sequence)
+    except (TypeError, ValueError):
+        after_sequence = 0
+    with _console_log_lock:
+        entries = [dict(entry) for entry in _console_log_entries if entry["sequence"] > after_sequence]
+        next_sequence = _console_log_next_sequence
+        hooked = console_log_hooked()
+    text = "".join(entry["text"] for entry in entries)
+    return dict({
+        "hooked": hooked,
+        "entries": entries,
+        "entryCount": len(entries),
+        "nextSequence": next_sequence,
+    }, **truncate_text(text))
+
+
+def rpc_get_console_log(params):
+    return collect_console_log(params)
+
+
 def write_connection_file(data):
     os.makedirs(os.path.dirname(CONNECTION_FILE), exist_ok=True)
     with open(CONNECTION_FILE, "w", encoding="utf-8") as f:
@@ -179,6 +276,8 @@ def rpc_status(_params):
         "idleTimeoutSeconds": idle_timeout_seconds(),
         "activeUntil": active_until,
         "activeRemainingSeconds": max(0, int(active_until - time.time())),
+        "consoleLogHooked": console_log_hooked(),
+        "consoleLogEntries": len(_console_log_entries),
         "methods": sorted(RPC_METHODS.keys()),
     }
 
@@ -415,6 +514,7 @@ RPC_METHODS = {
     "run_text_command": rpc_run_text_command,
     "get_output_panel": rpc_get_output_panel,
     "list_output_panels": rpc_list_output_panels,
+    "get_console_log": rpc_get_console_log,
 }
 
 
@@ -464,6 +564,7 @@ class BridgeServer:
         self.thread = threading.Thread(target=self.server.serve_forever, name="SublimeAgentBridge", daemon=True)
 
     def start(self):
+        install_console_log_hook()
         self.thread.start()
         refresh_idle_deadline()
         data = {
@@ -480,6 +581,7 @@ class BridgeServer:
 
     def stop(self, clear_state=True):
         try:
+            uninstall_console_log_hook()
             self.server.shutdown()
             self.server.server_close()
             try:
@@ -509,6 +611,8 @@ def start_server():
             log("started {}".format(_server.endpoint))
             return _server
         except Exception:
+            uninstall_console_log_hook()
+            _server = None
             log("start failed:\n" + traceback.format_exc())
             raise
 
